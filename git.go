@@ -51,12 +51,10 @@ type GitCommit struct {
 	Message   string
 }
 type GitStore struct {
-	Refs            map[string]string
-	RefOrder        []string
-	objects         map[string]*gitStoredObject
-	connected       map[string]bool
-	cloneGeneration uint64
-	cloneCache      uploadCache
+	Refs      map[string]string
+	RefOrder  []string
+	objects   map[string]*gitStoredObject
+	connected map[string]bool
 }
 
 func NewGitStore() *GitStore {
@@ -83,7 +81,6 @@ func (s *GitStore) Write(t string, data []byte) string {
 	gitAssert(gitValidType(t) && len(data) <= gitMaxObject, "invalid object")
 	id := gitHash(t, data)
 	if s.objects[id] == nil {
-		s.cloneGeneration++
 		s.objects[id] = &gitStoredObject{GitObject: GitObject{Type: t, Data: bytes.Clone(data)}}
 	}
 	return id
@@ -99,14 +96,12 @@ func (s *GitStore) SetRef(ref, id string) {
 	if _, ok := s.Refs[ref]; !ok {
 		s.RefOrder = append(s.RefOrder, ref)
 	}
-	s.cloneGeneration++
 	s.Refs[ref] = id
 }
 func (s *GitStore) DeleteRef(ref string) {
 	if _, ok := s.Refs[ref]; !ok {
 		return
 	}
-	s.cloneGeneration++
 	delete(s.Refs, ref)
 	for i, x := range s.RefOrder {
 		if x == ref {
@@ -1131,7 +1126,6 @@ func (s *GitStore) receive(body []byte) []byte {
 		if o := incoming[id]; o != nil && s.objects[id] == nil {
 			// Keep only the compressed member, not the whole HTTP request.
 			o.compressed = bytes.Clone(o.compressed)
-			s.cloneGeneration++
 			s.objects[id] = o
 		}
 		s.connected[id] = true
@@ -1211,7 +1205,6 @@ func (s *GitStore) receive(body []byte) []byte {
 		for id := range staged {
 			publish(id)
 		}
-		s.cloneGeneration++
 		s.Refs, s.RefOrder = refs.Refs, refs.RefOrder
 	}
 	for i, cmd := range commands {
@@ -1264,7 +1257,7 @@ func (s *GitStore) HTTP(w http.ResponseWriter, q *http.Request, u *url.URL, serv
 			gitStatus(w, 403, "Unsupported Git service")
 			return
 		}
-		gitSend(w, 200, "application/x-"+target+"-advertisement", s.cloneBytes("info/refs:"+target, v2, nil, func() []byte { return s.advertise(target, v2) }))
+		gitSend(w, 200, "application/x-"+target+"-advertisement", s.advertise(target, v2))
 		return
 	}
 	if service != "git-upload-pack" && service != "git-receive-pack" {
@@ -1281,7 +1274,7 @@ func (s *GitStore) HTTP(w http.ResponseWriter, q *http.Request, u *url.URL, serv
 	}
 	var result []byte
 	if service == "git-upload-pack" {
-		result = s.cloneBytes(service, v2, body, func() []byte { return s.upload(body, v2) })
+		result = s.upload(body, v2)
 	} else {
 		result = s.receive(body)
 	}
