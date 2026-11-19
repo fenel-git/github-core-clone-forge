@@ -32,134 +32,57 @@ var hostRoute = regexp.MustCompile(`^(?:[A-Za-z0-9.-]+|\[::1\])(?::[0-9]{1,5})?$
 var issueRoute = regexp.MustCompile(`^/api/v3/repos/([A-Za-z0-9_-][A-Za-z0-9_.-]*)/([A-Za-z0-9_-][A-Za-z0-9_.-]*)/issues(?:/([1-9][0-9]*))?/?$`)
 
 type App struct {
-	api        *Forge
-	token      string
-	mu         sync.RWMutex
-	sequence   atomic.Uint64
-	cacheMu    sync.RWMutex
-	issueCache map[string][]byte
+	api           *Forge
+	token, bearer []byte
+	mu            sync.RWMutex
+	sequence      atomic.Uint64
+	cacheMu       sync.RWMutex
+	issueCache    map[string]wireResponse
 }
 
-func (a *App) issueWire(w http.ResponseWriter, r *http.Request, u *url.URL, id string) bool {
-	if r.Method != "GET" {
-		return false
-	}
-	match := issueRoute.FindStringSubmatch(u.EscapedPath())
-	if match == nil || (match[3] == "" && u.RawQuery != "") {
-		return false
-	}
-	repo := a.api.Repo(match[1], match[2])
-	if repo == nil {
-		sendReply(w, r, missing(), id)
-		return true
-	}
-	key := strings.ToLower(match[1]+"/"+match[2]) + "/" + match[3]
-	a.cacheMu.RLock()
-	wire := a.issueCache[key]
-	a.cacheMu.RUnlock()
-	if wire == nil {
-		if match[3] != "" {
-			n, _ := strconv.Atoi(match[3])
-			issue := repo.Issues[n]
-			if issue == nil {
-				sendReply(w, r, missing(), id)
-				return true
-			}
-			wire = []byte(js(issue))
-		} else {
-			if len(repo.Issues) > 30 {
-				return false
-			}
-			list := []any{}
-			for i := len(repo.IssueOrder) - 1; i >= 0; i-- {
-				v := repo.Issues[repo.IssueOrder[i]]
-				if v["state"] == "open" {
-					list = append(list, v)
-				}
-			}
-			wire = []byte(js(list))
-		}
-		a.cacheMu.Lock()
-		if a.issueCache == nil {
-			a.issueCache = make(map[string][]byte)
-		}
-		if existing := a.issueCache[key]; existing != nil {
-			wire = existing
-		} else {
-			a.issueCache[key] = wire
-		}
-		a.cacheMu.Unlock()
-	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Content-Length", strconv.Itoa(len(wire)))
-	w.Header().Set("X-Github-Request-Id", id)
-	w.WriteHeader(200)
-	_, _ = w.Write(wire)
-	return true
-}
 func newApp() *App {
 	login := os.Getenv("MAKEFUN_FORGE_LOGIN")
 	if login == "" {
 		login = "adaiversen"
 	}
-	return &App{api: NewForge(login, os.Getenv("MAKEFUN_TRIAL_NOW")), token: os.Getenv("MAKEFUN_SHOP_TOKEN")}
+	token := os.Getenv("MAKEFUN_SHOP_TOKEN")
+	return &App{api: NewForge(login, os.Getenv("MAKEFUN_TRIAL_NOW")), token: []byte(token), bearer: []byte("Bearer " + token)}
 }
-func (a *App) authorized(r *http.Request) bool {
-	if a.token == "" {
+func (a *App) authorized(r *rawRequest) bool {
+	if len(a.token) == 0 {
 		return false
 	}
-	auth := r.Header.Get("Authorization")
-	if subtle.ConstantTimeCompare([]byte(auth), []byte("Bearer "+a.token)) == 1 {
+	auth := r.auth
+	if subtle.ConstantTimeCompare(auth, a.bearer) == 1 {
 		return true
 	}
-	if !strings.HasPrefix(auth, "Basic ") || !strings.Contains(r.RequestURI, ".git/") {
+	if !bytes.HasPrefix(auth, []byte("Basic ")) || !bytes.Contains(r.target, []byte(".git/")) {
 		return false
 	}
-	b, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic "))
+	b, err := base64.StdEncoding.AppendDecode(nil, auth[len("Basic "):])
 	if err != nil {
 		return false
 	}
-	_, pass, ok := strings.Cut(string(b), ":")
-	return ok && subtle.ConstantTimeCompare([]byte(pass), []byte(a.token)) == 1
+	_, pass, ok := bytes.Cut(b, []byte(":"))
+	return ok && subtle.ConstantTimeCompare(pass, a.token) == 1
 }
-func sendReply(w http.ResponseWriter, r *http.Request, reply Reply, id string) {
-	var data []byte
-	if reply.Status != 204 && reply.Status != 202 && reply.Body != nil {
-		data = []byte(js(reply.Body))
-	} else if reply.Status != 204 && reply.Status != 202 && reply.Body == nil {
-		data = []byte("null")
-	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	w.Header().Set("X-Github-Request-Id", id)
-	for k, v := range reply.Headers {
-		w.Header().Set(k, v)
-	}
-	w.WriteHeader(reply.Status)
-	if r.Method != "HEAD" {
-		_, _ = w.Write(data)
-	}
-}
-func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (a *App) dispatchRaw(r *rawRequest) (x wireResponse) {
 	id := "FORGE-" + strconv.FormatUint(a.sequence.Add(1), 36)
 	defer func() {
 		if recover() != nil {
-			sendReply(w, r, fail(500, "Internal Server Error"), id)
+			x = rawReply(fail(500, "Internal Server Error"), id)
 		}
 	}()
-	raw := r.RequestURI
-	if r.Method == "GET" && raw == "/healthz" {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Content-Length", "11")
-		_, _ = w.Write([]byte(`{"ok":true}`))
-		return
+	raw := r.target
+	if bytes.Equal(r.method, []byte("GET")) && bytes.Equal(raw, []byte("/healthz")) {
+		return wireResponse{code: 200, typ: jsonType, body: []byte(`{"ok":true}`)}
 	}
-	send := func(reply Reply) { sendReply(w, r, reply, id) }
-	if !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") {
+	send := func(reply Reply) { x = rawReply(reply, id) }
+	if !bytes.HasPrefix(raw, []byte("/")) || bytes.HasPrefix(raw, []byte("//")) {
 		send(fail(400, "Bad Request"))
 		return
 	}
-	host := r.Host
+	host := string(r.host)
 	if host == "" {
 		host = "localhost"
 	}
@@ -174,7 +97,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	u, err := url.Parse("http://" + host + raw)
+	u, err := url.Parse("http://" + host + string(raw))
 	if err != nil {
 		send(fail(400, "Bad Request"))
 		return
@@ -200,8 +123,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Issue GETs and upload-pack only read application/Git state. Compression
 	// caches have per-object locks; the JSON byte cache has its own RWMutex.
-	shared := (isRest && r.Method == "GET" && issueRoute.MatchString(escaped)) ||
-		(match != nil && match[3] != "git-receive-pack" && (r.Method == "GET" || r.Method == "POST"))
+	shared := (isRest && bytes.Equal(r.method, []byte("GET")) && issueRoute.MatchString(escaped)) ||
+		(match != nil && match[3] != "git-receive-pack" && (bytes.Equal(r.method, []byte("GET")) || bytes.Equal(r.method, []byte("POST"))))
 	if shared {
 		a.mu.RLock()
 		defer a.mu.RUnlock()
@@ -209,31 +132,22 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		a.api.Origin = "http://" + host
-		if r.Method != "GET" && r.Method != "HEAD" {
+		if !bytes.Equal(r.method, []byte("GET")) && !bytes.Equal(r.method, []byte("HEAD")) {
 			a.cacheMu.Lock()
 			a.issueCache = nil
 			a.cacheMu.Unlock()
 		}
 	}
-	if isRest && a.issueWire(w, r, u, id) {
-		return
-	}
-	if isRest && (r.Method == "GET" || r.Method == "HEAD") {
-		send(a.api.Request(r.Method, u, nil))
-		return
-	}
-	var data []byte
-	if r.Method != "GET" && r.Method != "HEAD" {
-		data, err = io.ReadAll(io.LimitReader(r.Body, bodyLimit+1))
-		if err != nil {
-			send(fail(400, "Invalid request body"))
-			return
-		}
-		if len(data) > bodyLimit {
-			send(fail(413, "Invalid request body"))
-			return
+	if isRest && bytes.Equal(r.method, []byte("GET")) {
+		if hit, ok := a.cachedIssue(u, id); ok {
+			return hit
 		}
 	}
+	if isRest && (bytes.Equal(r.method, []byte("GET")) || bytes.Equal(r.method, []byte("HEAD"))) {
+		send(a.api.Request(string(r.method), u, nil))
+		return
+	}
+	data := r.body
 	if match != nil {
 		owner, e := url.PathUnescape(match[1])
 		name, e2 := url.PathUnescape(match[2])
@@ -246,10 +160,9 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			send(missing())
 			return
 		}
-		repo.Git.HTTP(w, r, u, match[3], data)
-		return
+		return repo.Git.rawHTTP(r.method, r.protocol, u, match[3], data)
 	}
-	if (isGraph || isMcp) && r.Method != "POST" {
+	if (isGraph || isMcp) && !bytes.Equal(r.method, []byte("POST")) {
 		send(fail(405, "Method Not Allowed"))
 		return
 	}
@@ -269,8 +182,15 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else if isMcp {
 		send(MCP(body, a.api))
 	} else {
-		send(a.api.Request(r.Method, u, body))
+		reply := a.api.Request(string(r.method), u, body)
+		if reply.Status == 201 && bytes.Equal(r.method, []byte("POST")) && strings.HasSuffix(strings.TrimSuffix(escaped, "/"), "/issues") {
+			if j, ok := reply.Body.(J); ok && j["repository_url"] != nil {
+				return wireResponse{code: 201, typ: jsonType, id: id, body: issueJSON(nil, j)}
+			}
+		}
+		send(reply)
 	}
+	return
 }
 func retryDelay(attempt int) time.Duration {
 	if attempt > 3 {
@@ -282,7 +202,7 @@ func retryDelay(attempt int) time.Duration {
 	}
 	return d
 }
-func lifecycle(server *http.Server, listener net.Listener, env string) error {
+func lifecycle(listener net.Listener, env string) error {
 	client := &http.Client{Timeout: 30 * time.Second}
 	port := listener.Addr().(*net.TCPAddr).Port
 	for attempt := 0; ; attempt++ {
@@ -329,9 +249,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	server := &http.Server{Handler: newApp(), IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384}
+	app := newApp()
 	go func() {
-		if e := server.Serve(listener); e != nil && !errors.Is(e, http.ErrServerClosed) {
+		if e := serveRaw(listener, app); e != nil && !errors.Is(e, net.ErrClosed) {
 			log.Print(e)
 		}
 	}()
@@ -340,11 +260,11 @@ func main() {
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
 		<-ch
-	} else if err = lifecycle(server, listener, env); err != nil {
+	} else if err = lifecycle(listener, env); err != nil {
 		fmt.Fprintln(os.Stderr, "[entry]", err)
-		_ = server.Close()
+		_ = listener.Close()
 		os.Exit(1)
 	}
-	_ = server.Close()
+	_ = listener.Close()
 	fmt.Println("[entry] done")
 }

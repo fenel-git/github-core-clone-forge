@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"net/http"
 	"net/url"
 	"regexp"
 	"slices"
@@ -55,6 +54,7 @@ type GitStore struct {
 	RefOrder  []string
 	objects   map[string]*gitStoredObject
 	connected map[string]bool
+	uploads   uploadCache
 }
 
 func NewGitStore() *GitStore {
@@ -1230,53 +1230,44 @@ func (s *GitStore) receive(body []byte) []byte {
 	}
 	return report.Bytes()
 }
-func gitSend(w http.ResponseWriter, status int, typ string, data []byte) {
-	w.Header().Set("Content-Type", typ)
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	w.WriteHeader(status)
-	w.Write(data)
+func gitResponse(code int, typ string, body []byte) wireResponse {
+	return wireResponse{code: code, typ: typ, body: body, git: true}
 }
-func gitStatus(w http.ResponseWriter, status int, message string) {
-	gitSend(w, status, "application/json", []byte(`{"message":`+strconv.Quote(message)+`}`))
+func gitError(code int, msg string) wireResponse {
+	return gitResponse(code, "application/json", append(appendJSONString([]byte(`{"message":`), msg), '}'))
 }
-func (s *GitStore) HTTP(w http.ResponseWriter, q *http.Request, u *url.URL, service string, body []byte) {
+func (s *GitStore) rawHTTP(method, protocol []byte, u *url.URL, service string, body []byte) (x wireResponse) {
 	defer func() {
 		if recover() != nil {
-			gitStatus(w, 400, "Malformed Git request")
+			x = gitError(400, "Malformed Git request")
 		}
 	}()
-	v2 := gitProtocolV2.MatchString(q.Header.Get("Git-Protocol"))
+	v2 := gitProtocolV2.Match(protocol)
 	if service == "info/refs" {
-		if q.Method != "GET" {
-			gitStatus(w, 405, "Method Not Allowed")
-			return
+		if !bytes.Equal(method, []byte("GET")) {
+			return gitError(405, "Method Not Allowed")
 		}
 		target := u.Query().Get("service")
 		if target != "git-upload-pack" && target != "git-receive-pack" {
-			gitStatus(w, 403, "Unsupported Git service")
-			return
+			return gitError(403, "Unsupported Git service")
 		}
-		gitSend(w, 200, "application/x-"+target+"-advertisement", s.advertise(target, v2))
-		return
+		return gitResponse(200, "application/x-"+target+"-advertisement", s.advertise(target, v2))
+
 	}
 	if service != "git-upload-pack" && service != "git-receive-pack" {
-		gitStatus(w, 404, "Not Found")
-		return
+		return gitError(404, "Not Found")
 	}
-	if q.Method != "POST" {
-		gitStatus(w, 405, "Method Not Allowed")
-		return
+	if !bytes.Equal(method, []byte("POST")) {
+		return gitError(405, "Method Not Allowed")
 	}
 	if len(body) > gitMaxExpandedPack {
-		gitStatus(w, 413, "Git request too large")
-		return
+		return gitError(413, "Git request too large")
 	}
 	var result []byte
 	if service == "git-upload-pack" {
-		result = s.upload(body, v2)
+		return s.uploadResponse(body, v2)
 	} else {
 		result = s.receive(body)
 	}
-	gitSend(w, 200, "application/x-"+service+"-result", result)
+	return gitResponse(200, "application/x-"+service+"-result", result)
 }
