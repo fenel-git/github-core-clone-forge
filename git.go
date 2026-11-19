@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
 	"net/url"
 	"regexp"
 	"slices"
@@ -50,11 +51,12 @@ type GitCommit struct {
 	Message   string
 }
 type GitStore struct {
-	Refs      map[string]string
-	RefOrder  []string
-	objects   map[string]*gitStoredObject
-	connected map[string]bool
-	uploads   uploadCache
+	Refs            map[string]string
+	RefOrder        []string
+	objects         map[string]*gitStoredObject
+	connected       map[string]bool
+	cloneGeneration uint64
+	cloneCache      uploadCache
 }
 
 func NewGitStore() *GitStore {
@@ -81,6 +83,7 @@ func (s *GitStore) Write(t string, data []byte) string {
 	gitAssert(gitValidType(t) && len(data) <= gitMaxObject, "invalid object")
 	id := gitHash(t, data)
 	if s.objects[id] == nil {
+		s.cloneGeneration++
 		s.objects[id] = &gitStoredObject{GitObject: GitObject{Type: t, Data: bytes.Clone(data)}}
 	}
 	return id
@@ -96,12 +99,14 @@ func (s *GitStore) SetRef(ref, id string) {
 	if _, ok := s.Refs[ref]; !ok {
 		s.RefOrder = append(s.RefOrder, ref)
 	}
+	s.cloneGeneration++
 	s.Refs[ref] = id
 }
 func (s *GitStore) DeleteRef(ref string) {
 	if _, ok := s.Refs[ref]; !ok {
 		return
 	}
+	s.cloneGeneration++
 	delete(s.Refs, ref)
 	for i, x := range s.RefOrder {
 		if x == ref {
@@ -1126,6 +1131,7 @@ func (s *GitStore) receive(body []byte) []byte {
 		if o := incoming[id]; o != nil && s.objects[id] == nil {
 			// Keep only the compressed member, not the whole HTTP request.
 			o.compressed = bytes.Clone(o.compressed)
+			s.cloneGeneration++
 			s.objects[id] = o
 		}
 		s.connected[id] = true
@@ -1205,6 +1211,7 @@ func (s *GitStore) receive(body []byte) []byte {
 		for id := range staged {
 			publish(id)
 		}
+		s.cloneGeneration++
 		s.Refs, s.RefOrder = refs.Refs, refs.RefOrder
 	}
 	for i, cmd := range commands {
@@ -1230,44 +1237,53 @@ func (s *GitStore) receive(body []byte) []byte {
 	}
 	return report.Bytes()
 }
-func gitResponse(code int, typ string, body []byte) wireResponse {
-	return wireResponse{code: code, typ: typ, body: body, git: true}
+func gitSend(w http.ResponseWriter, status int, typ string, data []byte) {
+	w.Header().Set("Content-Type", typ)
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.WriteHeader(status)
+	w.Write(data)
 }
-func gitError(code int, msg string) wireResponse {
-	return gitResponse(code, "application/json", append(appendJSONString([]byte(`{"message":`), msg), '}'))
+func gitStatus(w http.ResponseWriter, status int, message string) {
+	gitSend(w, status, "application/json", []byte(`{"message":`+strconv.Quote(message)+`}`))
 }
-func (s *GitStore) rawHTTP(method, protocol []byte, u *url.URL, service string, body []byte) (x wireResponse) {
+func (s *GitStore) HTTP(w http.ResponseWriter, q *http.Request, u *url.URL, service string, body []byte) {
 	defer func() {
 		if recover() != nil {
-			x = gitError(400, "Malformed Git request")
+			gitStatus(w, 400, "Malformed Git request")
 		}
 	}()
-	v2 := gitProtocolV2.Match(protocol)
+	v2 := gitProtocolV2.MatchString(q.Header.Get("Git-Protocol"))
 	if service == "info/refs" {
-		if !bytes.Equal(method, []byte("GET")) {
-			return gitError(405, "Method Not Allowed")
+		if q.Method != "GET" {
+			gitStatus(w, 405, "Method Not Allowed")
+			return
 		}
 		target := u.Query().Get("service")
 		if target != "git-upload-pack" && target != "git-receive-pack" {
-			return gitError(403, "Unsupported Git service")
+			gitStatus(w, 403, "Unsupported Git service")
+			return
 		}
-		return gitResponse(200, "application/x-"+target+"-advertisement", s.advertise(target, v2))
-
+		gitSend(w, 200, "application/x-"+target+"-advertisement", s.cloneBytes("info/refs:"+target, v2, nil, func() []byte { return s.advertise(target, v2) }))
+		return
 	}
 	if service != "git-upload-pack" && service != "git-receive-pack" {
-		return gitError(404, "Not Found")
+		gitStatus(w, 404, "Not Found")
+		return
 	}
-	if !bytes.Equal(method, []byte("POST")) {
-		return gitError(405, "Method Not Allowed")
+	if q.Method != "POST" {
+		gitStatus(w, 405, "Method Not Allowed")
+		return
 	}
 	if len(body) > gitMaxExpandedPack {
-		return gitError(413, "Git request too large")
+		gitStatus(w, 413, "Git request too large")
+		return
 	}
 	var result []byte
 	if service == "git-upload-pack" {
-		return s.uploadResponse(body, v2)
+		result = s.cloneBytes(service, v2, body, func() []byte { return s.upload(body, v2) })
 	} else {
 		result = s.receive(body)
 	}
-	return gitResponse(200, "application/x-"+service+"-result", result)
+	gitSend(w, 200, "application/x-"+service+"-result", result)
 }

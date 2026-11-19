@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 )
@@ -22,6 +23,8 @@ type Repo struct {
 	PullOrder  []int
 	Comments   map[int][]any
 	Number     int
+	issueMu    sync.RWMutex
+	issueCache map[int][]byte
 }
 
 type Forge struct {
@@ -553,6 +556,7 @@ func (f *Forge) issues(repo *Repo, path []string, method string, u *url.URL, bod
 				"repository_url": repositoryURL, "url": fmt.Sprintf("%s/issues/%d", repositoryURL, number),
 			})
 			repo.Issues[number] = item
+			delete(repo.issueCache, 0)
 			repo.IssueOrder = append(repo.IssueOrder, number)
 			return out(201, item)
 		}
@@ -582,6 +586,8 @@ func (f *Forge) issues(repo *Repo, path []string, method string, u *url.URL, bod
 				}
 			}
 			issue["updated_at"] = f.stamp()
+			delete(repo.issueCache, number)
+			delete(repo.issueCache, 0)
 			return out(200, issue)
 		}
 	}
@@ -604,6 +610,8 @@ func (f *Forge) issues(repo *Repo, path []string, method string, u *url.URL, bod
 			comments = append(comments, item)
 			repo.Comments[number] = comments
 			issue["comments"] = len(comments)
+			delete(repo.issueCache, number)
+			delete(repo.issueCache, 0)
 			return out(201, item)
 		}
 	}
