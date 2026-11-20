@@ -1,0 +1,29 @@
+{
+  "candidate": "forge-fastwire",
+  "historical_grade": "01a1f6aa-919c-7373-b799-f450d5864912",
+  "prior_scope": "Termux process grade; 120/120 x3 and replay 3/3; not submission-ready (own-work preflight failed)",
+  "runtime_source_sha256": {
+    "common.go": "994b99eb8935f7b821edcbef0fe25b401882b4afd50933a041636172f83af418",
+    "git.go": "733e6fee88cb20e9fe61240b69ffb25ec45e916f0d820fc28c30a3ad55af8af0",
+    "git_test.go": "ed56cbcb13654ded6f2512ee8506b5758a580bf8ebec307d857d537f45375798",
+    "git_wire_test.go": "501c6c754b5a460e59976dd4aaac7d7c50536ccb26cf39b7a8cb3b380506792d",
+    "go.mod": "c8a4457a76e6ca77e208f022fcb6283a50c8626aef4269bc43e8e353282f93e1",
+    "graphql.go": "d69161ac2b70ad0ca8aaef1bf633127ec2a14f05f4d17308c365ea93da3fe689",
+    "graphql_mcp_test.go": "6667593efd2cfed8bbc1e73dcd44991c6ff8d5cccc71e4f1e62fdbe875747a85",
+    "hotpath_test.go": "1075f8fce6966db633a7feaf877066859f2ac3da37d718bf839193b4707efc89",
+    "main.go": "482af46a4b9884089971ecea3853bba83244db4f9edd0be251c2d9db25a5d093",
+    "main_test.go": "0be17c9692ae5fedafdb9556c2cf0916fa344580dc28571beee4f44f2ec8878f",
+    "mcp.go": "ac2b5cd1108c11a8562e5aebf2df7437f971cdf0979c7144beabd4ff3a02f62d",
+    "store.go": "8a9aa1dcfada66bebe854331b830f2e27fd6824e0a75f78f1763c3682c619609",
+    "store_test.go": "99e87ab87af9853b52ba291da168cdad4878e3f0be3c7e0264e7395824c4a036",
+    "git_protocol_v2_test.go": "e027f146c48ebcc58f28d706d415a0b48d61c40fe580a769b690275bb765aa5a",
+    "rest_concurrency_test.go": "8a046dc65df2ae933facdde6e8fc077c7639c12b1d87aed9166ebe6c19247a8a",
+    "graphql_determinism_test.go": "72c142f38e3084c7999daf52eace3e5e01010a899d08ef73783daa1799285f69",
+    "fastwire/wire_test.go": "62c12d487ca0625266ef75ab14983adbdcbc875ef3233ff3c16935ccc81e70b5",
+    "fastwire/wire.go": "af035d042542bb86b120f0b65966fc2b42d05d601c582c28298fa615ce0192c9",
+    "fastwire/arena_routes_test.go": "ec8170df498ca2fcfd4eab6eecf7e9fa7f46d11cb6b58a3fa2bc23a3a153d2bf",
+    "fastwire/arena_routes.go": "13d2cb366d7900e1de9ba8e09c6a8e8bf4ae1b16f57a93e166ef887f16cdcc46"
+  },
+  "baseline": "75ddd531a113fb5e5dfc745594e74d280c20e2d1",
+  "publication_allowed": false
+}

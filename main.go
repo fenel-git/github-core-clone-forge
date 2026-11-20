@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"forge/fastwire"
 	"io"
 	"log"
 	"net"
@@ -26,10 +27,7 @@ import (
 
 const bodyLimit = 32 * 1024 * 1024
 
-var gitRoute = regexp.MustCompile(`^/([^/]+)/([^/]+)\.git/(info/refs|git-upload-pack|git-receive-pack)$`)
 var hostRoute = regexp.MustCompile(`^(?:[A-Za-z0-9.-]+|\[::1\])(?::[0-9]{1,5})?$`)
-
-var issueRoute = regexp.MustCompile(`^/api/v3/repos/([A-Za-z0-9_-][A-Za-z0-9_.-]*)/([A-Za-z0-9_-][A-Za-z0-9_.-]*)/issues(?:/([1-9][0-9]*))?/?$`)
 
 type App struct {
 	api        *Forge
@@ -40,26 +38,25 @@ type App struct {
 	issueCache map[string][]byte
 }
 
-func (a *App) issueWire(w http.ResponseWriter, r *http.Request, u *url.URL, id string) bool {
+func (a *App) issueWire(w http.ResponseWriter, r *http.Request, u *url.URL, owner, name, number, id string) bool {
 	if r.Method != "GET" {
 		return false
 	}
-	match := issueRoute.FindStringSubmatch(u.EscapedPath())
-	if match == nil || (match[3] == "" && u.RawQuery != "") {
+	if number == "" && u.RawQuery != "" {
 		return false
 	}
-	repo := a.api.Repo(match[1], match[2])
+	repo := a.api.Repo(owner, name)
 	if repo == nil {
 		sendReply(w, r, missing(), id)
 		return true
 	}
-	key := strings.ToLower(match[1]+"/"+match[2]) + "/" + match[3]
+	key := strings.ToLower(owner+"/"+name) + "/" + number
 	a.cacheMu.RLock()
 	wire := a.issueCache[key]
 	a.cacheMu.RUnlock()
 	if wire == nil {
-		if match[3] != "" {
-			n, _ := strconv.Atoi(match[3])
+		if number != "" {
+			n, _ := strconv.Atoi(number)
 			issue := repo.Issues[n]
 			if issue == nil {
 				sendReply(w, r, missing(), id)
@@ -109,7 +106,7 @@ func (a *App) authorized(r *http.Request) bool {
 		return false
 	}
 	auth := r.Header.Get("Authorization")
-	if subtle.ConstantTimeCompare([]byte(auth), []byte("Bearer "+a.token)) == 1 {
+	if fastwire.MatchBearer(auth, a.token) {
 		return true
 	}
 	if !strings.HasPrefix(auth, "Basic ") || !strings.Contains(r.RequestURI, ".git/") {
@@ -185,14 +182,15 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	isMcp := p == "/mcp"
 	// Match encoded path as the Node URL implementation does; decode route captures once.
 	escaped := u.EscapedPath()
-	match := gitRoute.FindStringSubmatch(escaped)
-	if !isRest && !isGraph && !isMcp && match == nil {
+	gitOwner, gitName, service, isGit := fastwire.GitPath(escaped)
+	issueOwner, issueName, number, isIssue := fastwire.IssuePath(escaped)
+	if !isRest && !isGraph && !isMcp && !isGit {
 		send(missing())
 		return
 	}
 	if !a.authorized(r) {
 		reply := fail(401, "Bad credentials")
-		if match != nil {
+		if isGit {
 			reply.Headers = map[string]string{"www-authenticate": `Basic realm="Forge"`}
 		}
 		send(reply)
@@ -200,8 +198,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Issue GETs and upload-pack only read application/Git state. Compression
 	// caches have per-object locks; the JSON byte cache has its own RWMutex.
-	shared := (isRest && r.Method == "GET" && issueRoute.MatchString(escaped)) ||
-		(match != nil && match[3] != "git-receive-pack" && (r.Method == "GET" || r.Method == "POST"))
+	shared := (isRest && r.Method == "GET" && isIssue) ||
+		(isGit && service != "git-receive-pack" && (r.Method == "GET" || r.Method == "POST"))
 	if shared {
 		a.mu.RLock()
 		defer a.mu.RUnlock()
@@ -215,7 +213,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			a.cacheMu.Unlock()
 		}
 	}
-	if isRest && a.issueWire(w, r, u, id) {
+	if isRest && isIssue && a.issueWire(w, r, u, issueOwner, issueName, number, id) {
 		return
 	}
 	if isRest && (r.Method == "GET" || r.Method == "HEAD") {
@@ -234,9 +232,9 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if match != nil {
-		owner, e := url.PathUnescape(match[1])
-		name, e2 := url.PathUnescape(match[2])
+	if isGit {
+		owner, e := url.PathUnescape(gitOwner)
+		name, e2 := url.PathUnescape(gitName)
 		if e != nil || e2 != nil {
 			send(fail(400, "Bad path"))
 			return
@@ -246,7 +244,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			send(missing())
 			return
 		}
-		repo.Git.HTTP(w, r, u, match[3], data)
+		repo.Git.HTTP(w, r, u, service, data)
 		return
 	}
 	if (isGraph || isMcp) && r.Method != "POST" {

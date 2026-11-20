@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"forge/fastwire"
 	"io"
 	"maps"
 	"net/http"
@@ -27,7 +28,7 @@ const gitMaxExpandedPack = 256 * 1024 * 1024
 const gitMaxEntries = 500000
 
 var gitOID = regexp.MustCompile(`^[0-9a-f]{40}$`)
-var gitHex4 = regexp.MustCompile(`^[0-9a-fA-F]{4}$`)
+
 var gitDigits = regexp.MustCompile(`^[0-9]+$`)
 var gitProtocolV2 = regexp.MustCompile(`(?:^|:)\s*version=2(?:\s*:|\s*$)`)
 var gitBadRef = regexp.MustCompile(`\.\.|@\{|[\x00-\x20\x7f~^:?*\[\\]`)
@@ -67,10 +68,8 @@ func gitAssert(ok bool, message string) {
 }
 func gitValidType(t string) bool { return t == "commit" || t == "tree" || t == "blob" || t == "tag" }
 func gitHash(t string, data []byte) string {
-	h := sha1.New()
-	fmt.Fprintf(h, "%s %d\x00", t, len(data))
-	h.Write(data)
-	return hex.EncodeToString(h.Sum(nil))
+	sum := fastwire.ObjectHash(t, data)
+	return hex.EncodeToString(sum[:])
 }
 func gitReadOID(s string) string {
 	gitAssert(gitOID.MatchString(s) && s != gitZero, "invalid object ID")
@@ -650,10 +649,8 @@ func gitPkt(data []byte) []byte {
 }
 func gitPktText(s string) []byte { return gitPkt([]byte(s)) }
 func gitPacket(c *gitCursor) (string, int) {
-	p := string(c.take(4))
-	gitAssert(gitHex4.MatchString(p), "invalid pkt-line prefix")
-	n, err := strconv.ParseInt(p, 16, 32)
-	gitAssert(err == nil, "invalid pkt-line prefix")
+	n, ok := fastwire.PacketLength(c.take(4))
+	gitAssert(ok, "invalid pkt-line prefix")
 	if n == 0 || n == 1 {
 		return "", int(n)
 	}
@@ -672,18 +669,12 @@ func gitSection(c *gitCursor, terminator int) []string {
 	}
 }
 func gitSideband(data []byte, limit int) []byte {
-	var b bytes.Buffer
-	for p := 0; p < len(data); p += limit - 5 {
-		end := p + limit - 5
-		if end > len(data) {
-			end = len(data)
-		}
-		chunk := make([]byte, 1+end-p)
-		chunk[0] = 1
-		copy(chunk[1:], data[p:end])
-		b.Write(gitPkt(chunk))
+	if len(data) == 0 {
+		return nil
 	}
-	return b.Bytes()
+	wire, ok := fastwire.Sideband(data, limit)
+	gitAssert(ok, "invalid sideband limit")
+	return wire
 }
 func gitValidRef(ref string) bool {
 	if !strings.HasPrefix(ref, "refs/") || len(ref) > 1024 || gitBadRef.MatchString(ref) || strings.HasSuffix(ref, ".") {

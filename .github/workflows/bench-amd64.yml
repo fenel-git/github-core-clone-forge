@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      CANDIDATE: ${{ inputs.candidate || '75ddd531a113fb5e5dfc745594e74d280c20e2d1' }}
+      CANDIDATE: ${{ inputs.candidate || github.sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
