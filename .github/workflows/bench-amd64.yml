@@ -1,0 +1,76 @@
+name: Native amd64 benchmark (no publication)
+on:
+  push:
+    branches: [bench-amd64]
+    paths: ['bench/**', '.github/workflows/bench-amd64.yml']
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: 'Exact 40-character candidate commit; baseline means A/A calibration only'
+        required: true
+        default: '75ddd531a113fb5e5dfc745594e74d280c20e2d1'
+permissions:
+  contents: read
+concurrency:
+  group: bench-amd64
+  cancel-in-progress: false
+jobs:
+  native-ab:
+    # Standard public-repository hosted runner only. Never a larger/paid runner.
+    if: github.event.repository.private == false && github.ref == 'refs/heads/bench-amd64'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CANDIDATE: ${{ inputs.candidate || '75ddd531a113fb5e5dfc745594e74d280c20e2d1' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '26.13.1'
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Verify native architecture and input
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = x86_64
+          [[ "$CANDIDATE" =~ ^[0-9a-f]{40}$ ]]
+          git cat-file -e "$CANDIDATE^{commit}"
+          python -m unittest discover -s bench -p 'test_*.py' -v
+      - name: Download one official kit for both sides
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 2 --output "$RUNNER_TEMP/kit.tar.gz" https://make.fun/c/github-core-clone-01/kit
+          mkdir "$RUNNER_TEMP/kit"
+          tar -xzf "$RUNNER_TEMP/kit.tar.gz" -C "$RUNNER_TEMP/kit" --strip-components=1
+          test -f "$RUNNER_TEMP/kit/kit.json"
+      - name: Run sequential paired official grades
+        shell: bash
+        run: |
+          set -euo pipefail
+          extra=()
+          if [[ "$CANDIDATE" = 75ddd531a113fb5e5dfc745594e74d280c20e2d1 ]]; then extra+=(--calibration); fi
+          python bench/native_ab.py --repo "$GITHUB_WORKSPACE" --kit "$RUNNER_TEMP/kit" --candidate "$CANDIDATE" --output "$RUNNER_TEMP/native-ab-results" "${extra[@]}"
+      - name: Emit benchmark evidence to job logs (no artifact-storage charges)
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, pathlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-ab-results'
+          for name in ('manifest.json', 'runs.json', 'comparison.json'):
+              path = root / name
+              if path.exists():
+                  print(f'===== {name} =====')
+                  print(path.read_text())
+          for path in sorted(root.glob('*.log')):
+              print(f'===== {path.name} =====')
+              print(path.read_text())
+          PY
