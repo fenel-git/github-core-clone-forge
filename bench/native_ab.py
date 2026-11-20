@@ -52,7 +52,7 @@ def compare(runs,calibration=False):
     return {'calibration_only':calibration,'pairs':pairs,'all_states_identical':all(p['state_identical'] for p in pairs),'consistent_composite_win':all(p['composite_ratio']<1 for p in pairs),'no_workload_regression':all(v<=1 for p in pairs for v in p['workload_ratios'].values()),'official_preflight':'NOT_RUN','promotion_allowed':False,'reason':'This runner cannot publish. Post-cutoff official preflight, genuine provenance and owner review remain mandatory.'}
 
 def main():
-    ap=argparse.ArgumentParser();ap.add_argument('--repo',type=pathlib.Path,required=True);ap.add_argument('--kit',type=pathlib.Path,required=True);ap.add_argument('--candidate',required=True);ap.add_argument('--output',type=pathlib.Path,required=True);ap.add_argument('--calibration',action='store_true');args=ap.parse_args()
+    ap=argparse.ArgumentParser();ap.add_argument('--repo',type=pathlib.Path,required=True);ap.add_argument('--kit',type=pathlib.Path,required=True);ap.add_argument('--candidate',required=True);ap.add_argument('--output',type=pathlib.Path,required=True);ap.add_argument('--calibration',action='store_true');ap.add_argument('--single-core',action='store_true');args=ap.parse_args()
     if platform.system()!='Linux' or platform.machine() not in ('x86_64','amd64'):raise RuntimeError('Requires native Linux x86_64, not Termux/emulation')
     repo,kit,out=args.repo.resolve(),args.kit.resolve(),args.output.resolve();out.mkdir(parents=True,exist_ok=False)
     cli=kit/'cli/makefun.mjs';manifest=kit/'kit.json'
@@ -60,7 +60,8 @@ def main():
     spec=json.loads(manifest.read_text())
     for f in spec['files']:
         if sha(kit/f['path'])!=f['sha256']:raise RuntimeError('Kit hash mismatch: '+f['path'])
-    meta={'baseline':BASELINE,'platform':platform.platform(),'machine':platform.machine(),'node':command(['node','--version']).strip(),'go':command(['go','version']).strip(),'kit_manifest_sha256':sha(manifest),'order':ORDER}
+    allowed_cpus=sorted(os.sched_getaffinity(0));selected_cpu=allowed_cpus[0] if args.single_core else None
+    meta={'baseline':BASELINE,'platform':platform.platform(),'machine':platform.machine(),'node':command(['node','--version']).strip(),'go':command(['go','version']).strip(),'kit_manifest_sha256':sha(manifest),'order':ORDER,'resource_mode':'shared-single-core-stress' if args.single_core else 'unrestricted','allowed_cpus':allowed_cpus,'selected_cpu':selected_cpu,'gomaxprocs':1 if args.single_core else 'default','io_throttling':'none; no production quota or gVisor equivalence claimed'}
     for label,ref in [('A',BASELINE),('B',args.candidate)]:meta[label]=stage(repo,ref,out/label)
     same=meta['A']['commit']==meta['B']['commit']
     if same and not args.calibration:raise RuntimeError('Identical baseline and candidate: use --calibration for A/A only')
@@ -69,7 +70,14 @@ def main():
         home=out/(label+'-home');home.mkdir();env=dict(os.environ,HOME=str(home))
         for k in list(env):
             if k.startswith(('OPENAI_','ANTHROPIC_','MAKEFUN_','GH_','GITHUB_TOKEN')) or k in ('GOMAXPROCS','GOGC','GOMEMLIMIT'):env.pop(k,None)
-        text=command(['node',str(cli),'grade-local','--kit',str(kit),'--bot',str(out/label[0]),'--driver','process','--instances','3'],cwd=kit,env=env,log=out/(label+'.log'))
+        grade_cmd=['node',str(cli),'grade-local','--kit',str(kit),'--bot',str(out/label[0]),'--driver','process','--instances','3']
+        if args.single_core:
+            env['GOMAXPROCS']='1'
+            evidence=command(['taskset','--cpu-list',str(selected_cpu),'python3','-c','import os,json;print(json.dumps({"affinity":sorted(os.sched_getaffinity(0)),"GOMAXPROCS":os.environ.get("GOMAXPROCS")}))'],env=env)
+            measured=json.loads(evidence);assert measured=={'affinity':[selected_cpu],'GOMAXPROCS':'1'},measured
+            (out/(label+'-resource.json')).write_text(evidence)
+            grade_cmd=['taskset','--cpu-list',str(selected_cpu)]+grade_cmd
+        text=command(grade_cmd,cwd=kit,env=env,log=out/(label+'.log'))
         if len(re.findall(r'replay\s+matched:',text))!=3 or 'L1 regrade: reproduced byte for byte' not in text:raise RuntimeError('Replay/L1 verification incomplete for '+label)
         runs[label]=load_grade(home)
         binary=out/label[0]/'forge-linux-amd64'

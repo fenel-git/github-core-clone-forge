@@ -1,4 +1,4 @@
-name: Native amd64 benchmark (no publication)
+name: Native amd64 single-core stress (no publication)
 on:
   push:
     branches: [bench-amd64]
@@ -43,6 +43,8 @@ jobs:
           [[ "$CANDIDATE" =~ ^[0-9a-f]{40}$ ]]
           git cat-file -e "$CANDIDATE^{commit}"
           python -m unittest discover -s bench -p 'test_*.py' -v
+          command -v taskset
+          command -v strace || (sudo apt-get update -qq && sudo apt-get install -y strace)
       - name: Download one official kit for both sides
         shell: bash
         run: |
@@ -57,7 +59,15 @@ jobs:
           set -euo pipefail
           extra=()
           if [[ "$CANDIDATE" = 75ddd531a113fb5e5dfc745594e74d280c20e2d1 ]]; then extra+=(--calibration); fi
-          python bench/native_ab.py --repo "$GITHUB_WORKSPACE" --kit "$RUNNER_TEMP/kit" --candidate "$CANDIDATE" --output "$RUNNER_TEMP/native-ab-results" "${extra[@]}"
+          python bench/native_ab.py --single-core --repo "$GITHUB_WORKSPACE" --kit "$RUNNER_TEMP/kit" --candidate "$CANDIDATE" --output "$RUNNER_TEMP/native-ab-results" "${extra[@]}"
+      - name: Separate syscall audit (excluded from timed A/B)
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f "$RUNNER_TEMP/native-ab-results/manifest.json" ]]; then
+            python bench/syscall_audit.py --results "$RUNNER_TEMP/native-ab-results" --kit "$RUNNER_TEMP/kit"
+          fi
       - name: Emit benchmark evidence to job logs (no artifact-storage charges)
         if: always()
         shell: bash
@@ -65,7 +75,7 @@ jobs:
           python - <<'PY'
           import os, pathlib
           root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-ab-results'
-          for name in ('manifest.json', 'runs.json', 'comparison.json'):
+          for name in ('manifest.json', 'runs.json', 'comparison.json', 'syscall-audit.json', 'A1-resource.json', 'B1-resource.json', 'B2-resource.json', 'A2-resource.json', 'A3-resource.json', 'B3-resource.json'):
               path = root / name
               if path.exists():
                   print(f'===== {name} =====')
